@@ -1,19 +1,13 @@
-package de.liebig.callhierarchy;
+package de.liebig.callhierarchy.util;
 
 import de.liebig.callhierarchy.model.ChMethodInvocation;
 import de.liebig.callhierarchy.model.ChMethodNode;
 
 import java.util.List;
 
-public class Main {
-    public static void main(String[] args) {
-        ChMethodNode cmn = new ClassScanner().scanMethod(args[0], args[1], args[2]);
-        printCallTree(cmn);
-    }
+public class PrintUtils {
 
-    private static void printCallTree(final ChMethodNode cmn) {
-        int maxDepth = 8;
-
+    public static void printCallTree(final ChMethodNode cmn, int maxDepth) {
         printCallTree(cmn, 0, maxDepth);
     }
 
@@ -46,4 +40,5 @@ public class Main {
         sb.append(str);
         return sb.toString();
     }
+
 }

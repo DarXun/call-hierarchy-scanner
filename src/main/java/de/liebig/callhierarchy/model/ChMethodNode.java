@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 public class ChMethodNode {
 
@@ -50,8 +51,16 @@ public class ChMethodNode {
         return methodForInvocation.get(cmi);
     }
 
-    public void addInvocation(final String name, final String desc, final String owner) {
-        invocations.add(new ChMethodInvocation(name, desc, owner, this));
+    public void addInvocation(final ChMethodInvocation invocation) {
+        invocations.add(invocation);
+    }
+
+    public void addInvocation(final String name, final String desc, final String owner, final Supplier<List<String>> instanceTypeResolver) {
+        invocations.add(new ChMethodInvocation(name, desc, owner, this, instanceTypeResolver));
+    }
+
+    public void addInvocation(final String name, final String desc, final String owner, final String instanceType) {
+        invocations.add(new ChMethodInvocation(name, desc, owner, this, instanceType));
     }
 
     public List<ChMethodInvocation> getInvocations() {

@@ -12,6 +12,7 @@ import javax.swing.text.html.Option;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.*;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 
 public class ClassScanner {
@@ -62,37 +63,35 @@ public class ClassScanner {
     }
 
     private void resolveInvocations(final ChMethodNode chMethodNode) {
-        if ("org/objectweb/asm/ClassVisitor".equals(chMethodNode.getOwnerName()) && "visit".equals(chMethodNode.getName())) {
-            int x = 1;
-        }
-
         for (final ChMethodInvocation invocation : chMethodNode.getInvocations()) {
             ChMethodNode cmn = null;
 
-            // the invocation's got an owner which we may already have analyzed
-            if (CLASS_CACHE.containsKey(invocation.getOwner())) {
-                ChClassNode chClassNode = CLASS_CACHE.get(invocation.getOwner());
+            for (String owner : invocation.getInstanceTypes()) {
+                // the invocation's got an owner which we may already have analyzed
+                if (CLASS_CACHE.containsKey(owner)) {
+                    ChClassNode chClassNode = CLASS_CACHE.get(owner);
 
-                // was the ChMethodNode for this invocation already created?
-                Optional<ChMethodNode> mnForInvocation = chClassNode.getChMethodNode(invocation.getName(), invocation.getDesc());
-                if (mnForInvocation.isPresent()) {
-                    cmn = mnForInvocation.get();
-                } else {
-                    // otherwise we will now resolve it
-                    Optional<MethodNode> mn = chClassNode.findMethod(invocation.getName(), invocation.getDesc());
-                    if (mn.isPresent()) {
-                        cmn = createChMethodNode(chClassNode, mn.get());
-                        resolveInvocations(cmn);
+                    // was the ChMethodNode for this invocation already created?
+                    Optional<ChMethodNode> mnForInvocation = chClassNode.getChMethodNode(invocation.getName(), invocation.getDesc());
+                    if (mnForInvocation.isPresent()) {
+                        cmn = mnForInvocation.get();
+                    } else {
+                        // otherwise we will now resolve it
+                        Optional<MethodNode> mn = chClassNode.findMethod(invocation.getName(), invocation.getDesc());
+                        if (mn.isPresent()) {
+                            cmn = createChMethodNode(chClassNode, mn.get());
+                            resolveInvocations(cmn);
+                        }
                     }
                 }
-            }
 
-            if (cmn == null) {
-                System.out.println(String.format("Scanning %s %s %s next", invocation.getName(), invocation.getDesc(), invocation.getOwner()));
-                cmn = scanMethod(invocation.getName(), invocation.getDesc(), invocation.getOwner());
-            }
+                if (cmn == null) {
+                    System.out.println(String.format("Scanning %s %s %s next", invocation.getName(), invocation.getDesc(), owner));
+                    cmn = scanMethod(invocation.getName(), invocation.getDesc(), owner);
+                }
 
-            chMethodNode.addCallee(invocation, cmn);
+                chMethodNode.addCallee(invocation, cmn);
+            }
         }
 
     }
@@ -100,6 +99,7 @@ public class ClassScanner {
     /**
      * Creates a dummy ChMethodNode.
      * May be used if the real method could not be resolved because of class-loading errors
+     *
      * @param methodName
      * @param description
      * @param className
@@ -114,17 +114,66 @@ public class ClassScanner {
         final ChMethodNode chMethodNode = new ChMethodNode(method, chClassNode);
         chClassNode.addChMethodNode(chMethodNode);
 
+        String storedClassName = null;
+
         InsnList instructions = method.instructions;
         for (int i = 0; i < instructions.size(); i++) {
             AbstractInsnNode insn = instructions.get(i);
 
             switch (insn.getOpcode()) {
+                case Opcodes.NEW:
+                    TypeInsnNode tin = (TypeInsnNode) insn;
+                    storedClassName = tin.desc;
+                    System.out.println("NEW " + storedClassName);
+                    break;
+
                 case Opcodes.INVOKEVIRTUAL:
                 case Opcodes.INVOKESPECIAL:
                 case Opcodes.INVOKESTATIC:
-                case Opcodes.INVOKEINTERFACE:
                     MethodInsnNode min = (MethodInsnNode) insn;
-                    chMethodNode.addInvocation(min.name, min.desc, min.owner);
+                    chMethodNode.addInvocation(min.name, min.desc, min.owner, min.owner);
+
+                    if (storedClassName != null) {
+                        List<ChMethodInvocation> invocations = chMethodNode.getInvocations();
+                        ConstantPoolResolver.getInstance().addReference(storedClassName, invocations.get(invocations.size() - 1));
+                        storedClassName = null;
+                    }
+
+                    break;
+
+                case Opcodes.INVOKEINTERFACE:
+                    min = (MethodInsnNode) insn;
+
+                    // We need to find all implementations for min.owner that have been used up until now
+                    // This is done by collecting all "Class" constant-pool-references in the method-hierarchy
+                    // if it's a local variable we should be able to track it though and be 100% sure of the implementation
+
+                    // INVOKEINTERFACE operates on an instance, so we search for the previous ALOAD to find it
+                    VarInsnNode aloadInsn = (VarInsnNode) findInsn(min, Opcodes.ALOAD).orElseThrow(() -> new IllegalStateException("No ALOAD found for " + min));
+                    // maybe this is a local var, we should find an ASTORE then
+                    Optional<AbstractInsnNode> optAstoreInsn = findInsn(aloadInsn, Opcodes.ASTORE);
+                    if (optAstoreInsn.isPresent()) {
+                        // FIXME must match the same var as aloadInsn!
+                        MethodInsnNode invSpecialInsn = (MethodInsnNode) findInsn(optAstoreInsn.get(), Opcodes.INVOKESPECIAL).orElseThrow(() -> new IllegalStateException("No INVOKESPECIAL found for " + min));
+                        chMethodNode.addInvocation(min.name, min.desc, min.owner, invSpecialInsn.owner);
+                    } else {
+                        // we can't resolve the owner right now.
+                        // let's assume it's a candidate of one of the constant-pool-refs up until now (traverse up the hierarchy and get all subtypes of min.owner)
+                        ChMethodInvocation addInvocation = new ChMethodInvocation(min.name, min.desc, min.owner, chMethodNode);
+
+                        Supplier<List<String>> instanceTypeResolver = () -> {
+                            List<String> instanceTypeCandidates = new ArrayList<String>();
+                            // FIXME add all the constant-pool-refs for subtypes of min.owner!
+                            // where do i get them from? maybe a global queue like ds (saves every constant-pool ref for a specific invocation and then we traverse it until we find that invocation)
+//                            instanceTypeCandidates.add(min.owner);
+                            Map<String, Integer> refClasses = ConstantPoolResolver.getInstance().resolveClassesUntil(addInvocation);
+                            instanceTypeCandidates.addAll(refClasses.keySet());
+                            return instanceTypeCandidates;
+                        };
+
+                        addInvocation.setInstanceTypeResolver(instanceTypeResolver);
+                        chMethodNode.addInvocation(addInvocation);
+                    }
 
                     break;
 
@@ -135,7 +184,7 @@ public class ClassScanner {
                     if ("java/lang/invoke/LambdaMetafactory".equals(bsm.getOwner()) && "metafactory".equals(bsm.getName()) && "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;".equals(bsm.getDesc())) {
                         final Handle lambdaHandle = (Handle) idin.bsmArgs[1];
 
-                        chMethodNode.addInvocation(lambdaHandle.getName(), lambdaHandle.getDesc(), lambdaHandle.getOwner());
+                        chMethodNode.addInvocation(lambdaHandle.getName(), lambdaHandle.getDesc(), lambdaHandle.getOwner(), lambdaHandle.getOwner());
                     } else {
                         throw new IllegalArgumentException(String.format("Unrecognized INVOKEDYNAMIC-Instruction: %s", idin.toString()));
                     }
@@ -145,6 +194,23 @@ public class ClassScanner {
         }
 
         return chMethodNode;
+    }
+
+    private Optional<AbstractInsnNode> findInsn(AbstractInsnNode insn, int opcodeToFind) {
+        if (insn == null) {
+            throw new IllegalArgumentException("insn may not be null");
+        }
+
+        AbstractInsnNode prev = insn;
+        while (prev.getPrevious() != null) {
+            prev = prev.getPrevious();
+
+            if (prev.getOpcode() == opcodeToFind) {
+                return Optional.of(prev);
+            }
+        }
+
+        return Optional.empty();
     }
 
     public Optional<ChClassNode> findOwner(final ChClassNode chClassNode, final String name, final String desc) {
